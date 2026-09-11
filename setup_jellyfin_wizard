@@ -1,0 +1,1365 @@
+#!/bin/bash
+
+# MIT License
+#
+# Copyright (c) 2026 portalman1994
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+# Author: portalman1994
+#
+# Description:
+#   Modular task-based whiptail interface for automated provisioning
+#   and setup for headless Jellyfin API configuration on Termux for Android.
+#
+# Usage:
+#   bash setup_jellyfin_wizard
+
+# Strict execution flags
+set -o errexit   # Exit on command failure (-e)
+set -o nounset   # Fail on uninitialized variable access (-u)
+set -o pipefail  # Return pipeline failure status
+
+# ==============================================================================
+# GLOBAL CONSTANTS
+# ==============================================================================
+
+readonly JELLYFIN_URL="http://127.0.0.1:8096"
+readonly LIBRARY_LANGUAGE="eng"
+readonly LIBRARY_COUNTRY="US"
+
+readonly APP_DIR="$PREFIX/var/lib/setup_jellyfin_wizard"
+readonly LOG_FILE="${APP_DIR}/media_server_setup.log"
+readonly PROVISION_DIR="${APP_DIR}/flag_files"
+readonly DEPS_FLAG_FILE="${PROVISION_DIR}/.deps_installed"
+readonly CREATED_TV_FLAG_FILE="${PROVISION_DIR}/.tv_library_created"
+readonly CREATED_MOVIE_FLAG_FILE="${PROVISION_DIR}/.movie_library_created"
+readonly SCHEDULED_TASKS_FLAG_FILE="${PROVISION_DIR}/.tasks_configured"
+
+readonly MEDIA_DIR="media"
+readonly MOVIES_DIR="$MEDIA_DIR/Movies"
+readonly MOVIES_NAME="Movies"
+readonly MOVIES_TYPE="movies"
+readonly SHOWS_DIR="$MEDIA_DIR/Shows"
+readonly SHOWS_NAME="Shows"
+readonly SHOWS_TYPE="tvshows"
+
+readonly TERMUX_DIR="Android/data/com.termux/files"
+# ==============================================================================
+# STATE & HELPER FUNCTIONS
+# ==============================================================================
+
+detect_sd_card() {
+  local sd_card_id
+  sd_card_id=$(df -h | grep -oP '/storage/[A-F0-9]{4}-[A-F0-9]{4}' | cut -d'/' -f3)
+  if [[ -z "${sd_card_id}" ]]; then
+    printf "emulated/0"
+    return 0
+  fi
+  printf "%s" "$sd_card_id"
+}
+
+_task_pkg_update() {
+  pkg update -y -qq
+}
+
+_task_pkg_upgrade() {
+  pkg upgrade -y -o Dpkg::Options::="--force-confold"
+}
+
+_task_optimize_jellyfin() {
+  local mem_limit
+  mem_limit=$(awk '
+    /MemAvailable:/ {avail=$2}
+    /Buffers:/      {buff=$2}
+    END { if (avail) printf "%X", (avail - buff) * 1024 }
+  ' /proc/meminfo)
+  if ! grep -Fxq "export DOTNET_gcServer=0" "$HOME/.bashrc"; then
+    cat << EOF >> "$HOME/.bashrc"
+export DOTNET_gcServer=0
+export DOTNET_GCHeapHardLimit=$mem_limit
+export JELLYFIN_WEB_DIR=$PREFIX/lib/jellyfin/jellyfin-web
+export JELLYFIN_CACHE_DIR=$PREFIX/var/cache/jellyfin
+export JELLYFIN_DATA_DIR=$PREFIX/var/lib/jellyfin
+export JELLYFIN_LOG_DIR=$PREFIX/var/log/jellyfin
+EOF
+  fi
+
+  chmod +x "$HOME/.bashrc"
+}
+
+_task_install_script_deps() {
+  local -a pkgs_to_install=("$@")
+
+  if [[ "${#pkgs_to_install[@]}" -eq 0 ]]; then
+    printf '%s\n'  "No packages provided to install."
+    return 0
+  fi
+
+  printf "The following tools need to be installed with apt: %s\n" "${pkgs_to_install[*]}"
+  read -r -p "Proceed with installation? [y/N]: " response
+
+  if [[ "${response}" =~ ^[yY]([eE][sS])?$ ]]; then
+    printf "Running: pkg update -y\n"
+    _task_pkg_update || return 1
+    printf "Running: pkg install -y %s\n" "${pkgs_to_install[*]}"
+    pkg install -y -qq "${pkgs_to_install[@]}" || return 1
+  else
+    printf '\nInstallation canceled.\n'
+    return 1
+  fi
+}
+
+_task_install_jellyfin_deps() {
+  pkg install -y tur-repo
+  pkg update -y
+  pkg install -y ffmpeg dotnet-runtime-9.0 jellyfin-server
+
+  grep -qxF 'export PATH="/data/data/com.termux/files/usr/bin:$PATH"' "$HOME/.bashrc" || \
+  cat << 'EOF' >> "$HOME/.bashrc"
+export PATH="/data/data/com.termux/files/usr/bin:$PATH"
+EOF
+}
+
+_task_create_termux_autostart() {
+  cat << 'EOF' > "$HOME/.termux/boot/00-start-wakelock.sh"
+#!/data/data/com.termux/files/usr/bin/bash
+termux-wake-lock
+EOF
+
+  chmod +x "$HOME/.termux/boot/00-start-wakelock.sh"
+
+  grep -qxF "bash $HOME/.termux/boot/00-start-wakelock.sh" "$HOME/.bashrc" || \
+    echo "bash $HOME/.termux/boot/00-start-wakelock.sh" >> "$HOME/.bashrc"
+}
+
+_task_create_openssh_autostart() {
+  cat << 'EOF' > "$HOME/.termux/boot/01-start-openssh.sh"
+#!/data/data/com.termux/files/usr/bin/bash
+sshd &
+EOF
+  chmod +x "$HOME/.termux/boot/01-start-openssh.sh"
+
+  grep -qxF "bash $HOME/.termux/boot/01-start-openssh.sh" "$HOME/.bashrc" || \
+    echo "bash $HOME/.termux/boot/01-start-openssh.sh" >> "$HOME/.bashrc"
+}
+
+_task_create_jellyfin_autostart() {
+  local sd_card_id
+  sd_card_id=$(detect_sd_card)
+  cat << EOF > "$HOME/.termux/boot/02-start-jellyfin.sh"
+#!/data/data/com.termux/files/usr/bin/bash
+if [ -d "/storage/$sd_card_id/$TERMUX_DIR/media" ]; then
+  chmod -R 755 "/storage/$sd_card_id/$TERMUX_DIR/media"
+
+fi
+nohup jellyfin > /dev/null 2>&1 &
+EOF
+  chmod +x "$HOME/.termux/boot/02-start-jellyfin.sh"
+
+  grep -qxF "bash $HOME/.termux/boot/02-start-jellyfin.sh" "$HOME/.bashrc" || \
+    echo "bash $HOME/.termux/boot/02-start-jellyfin.sh" >> "$HOME/.bashrc"
+}
+
+log_msg() {
+  printf "%s - %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "${LOG_FILE}"
+}
+
+err() {
+  local -r msg="$*"
+  printf 'ERROR: %s\n' "${msg}" >&2
+  log_msg "ERROR: ${msg}"
+
+  if [[ -t 1 ]] && is_whiptail_installed; then
+    whiptail --title " Error " --msgbox "${msg}" 10 60
+  fi
+}
+
+info() {
+  local -r msg="$*"
+  printf 'INFO: %s\n' "${msg}" >&2
+  log_msg "INFO: ${msg}"
+
+  if [[ -t 1 ]] && is_whiptail_installed; then
+    whiptail --title " Information " --msgbox "${msg}" 10 60
+  fi
+}
+
+# ==============================================================================
+# TASK & ACTION FUNCTIONS
+# ==============================================================================
+
+are_termux_deps_installed() {
+  [[ -f "${DEPS_FLAG_FILE}" ]]
+}
+
+is_whiptail_installed() {
+  command -v whiptail &>/dev/null
+}
+
+is_openssh_installed() {
+  command -v sshd &>/dev/null
+}
+
+is_jq_installed() {
+  command -v jq &>/dev/null
+}
+
+is_jellyfin_installed() {
+  command -v jellyfin --version &>/dev/null
+}
+
+is_dlna_installed() {
+  local auth_file="$1"
+  local response
+  response=$(curl -s \
+    -H "@${auth_file}" \
+    "${JELLYFIN_URL}/Plugins" \
+    | jq -r '.[] | select(.Name == "DLNA") | .Name')
+
+  if [[ "${response}" == "DLNA" ]]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+is_movie_library_created() {
+  [[ -f "${CREATED_MOVIE_FLAG_FILE}" ]]
+}
+
+is_show_library_created() {
+  [[ -f "${CREATED_TV_FLAG_FILE}" ]]
+}
+
+is_movies_dir() {
+  local sd_card_dir
+  sd_card_dir=$(detect_sd_card)
+  [[ -d "/storage/$sd_card_dir/${TERMUX_DIR}/${MOVIES_DIR}" ]]
+}
+
+is_shows_dir() {
+  local sd_card_dir
+  sd_card_dir=$(detect_sd_card)
+  [[ -d "/storage/$sd_card_dir/${TERMUX_DIR}/${SHOWS_DIR}" ]]
+}
+
+is_jellyfin_online() {
+  log_msg "Waiting for Jellyfin to come back online..."
+  local elapsed
+  local max_wait
+  elapsed=0
+  max_wait=180
+
+  until curl -s "${JELLYFIN_URL}/System/Info/Public" | jq -e '.ProductName' > /dev/null 2>&1; do
+    if [ $elapsed -ge $max_wait ]; then
+      info "Jellyfin did not come back online after ${max_wait}s"
+      exit 1
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+    log_msg "Still waiting... (${elapsed}s)"
+  done
+}
+
+confirm_action() {
+  local -r title="$1"
+  local -r synopsis="$2"
+  local msg_proceed
+  read -r -d '' msg_proceed << EOF || true
+${synopsis}
+
+Do you want to proceed?
+EOF
+
+  whiptail --title "${title}" \
+    --yesno "${msg_proceed}" 12 60
+}
+
+notify_success() {
+  local -r title="$1"
+  local -r message="$2"
+
+  whiptail --title "${title} - Success" \
+    --msgbox "${message}" 8 55
+}
+
+notify_skipped() {
+  local -r title="$1"
+
+  whiptail --title "${title} - Skipped" \
+    --msgbox "No changes were made." 8 55
+}
+
+run_task() {
+  local -r title="$1"
+  local -r msg="$2"
+  local -r cond_func="$3"
+  local -r action_func="$4"
+  shift 4
+
+  if "${cond_func}" "$@"; then
+    return 0
+  fi
+
+  if ! confirm_action "${title}" "${msg}"; then
+    notify_skipped "${title}"
+    return 0
+  fi
+
+  "${action_func}" "$@"
+}
+
+execute_batch_tasks() {
+  if [[ "$#" -lt 2 ]]; then
+    err "Error: execute_batch_tasks requires at least 2 arguments."
+    return 1
+  fi
+
+  local -r title="$1"
+  local -r synopsis="$2"
+  shift 2
+
+  local -r actions=("$@")
+  local action_func
+
+  if confirm_action "${title}" "${synopsis}"; then
+    if [[ "${#actions[@]}" -eq 0 ]]; then
+      whiptail --title "Notice" \
+        --msgbox "No actions were selected to run." 8 55
+      return 0
+    fi
+
+    whiptail --title "Working" \
+      --infobox "Applying batch configurations..." 8 55
+
+    for action_func in "${actions[@]}"; do
+      [[ -z "${action_func}" ]] && continue
+
+      local func_name="${action_func%% *}"
+      if declare -f "${func_name}" &>/dev/null; then
+        log_msg "Executing batch action: ${action_func}"
+        if ! eval "${action_func}"; then
+          whiptail --title "Error" \
+            --msgbox "Batch process failed while running '${action_func}'." 8 55
+          return 1
+        fi
+      else
+        whiptail --title "Error" \
+          --msgbox "Unknown action handler: '${action_func}'" 8 55
+        return 1
+      fi
+    done
+
+    notify_success "${title}" "All batch configurations applied successfully!"
+  else
+    notify_skipped "${title}"
+  fi
+
+  return 0
+}
+
+run_with_progress() {
+  local -r title="${1:-}"
+
+  if (( $# > 0 )); then
+    shift
+  fi
+
+  local -ra tasks=("$@")
+  local -r total="${#tasks[@]}"
+
+  if [[ "${total}" -eq 0 ]]; then
+    return 0
+  fi
+
+  local tmp_exit
+  tmp_exit=$(mktemp) || { printf "Failed to create temporary file.\n" >&2; return 1; }
+  trap 'rm -f "${tmp_exit:-}"' RETURN
+
+  printf '0' > "${tmp_exit}"
+
+  {
+    local i task label cmd pct_start pct_end task_pid p
+    for i in "${!tasks[@]}"; do
+      task="${tasks[$i]}"
+      label="${task%%:*}"
+      cmd="${task#*:}"
+      pct_start=$(( i * 100 / total ))
+      pct_end=$(( (i + 1) * 100 / total ))
+
+      log_msg "Starting Task: ${label}"
+      printf 'XXX\n%d\n[%d/%d] %s\nXXX\n' "${pct_start}" "$((i + 1))" "${total}" "${label}"
+
+      ( eval "${cmd}" > /dev/null 2>&1 || printf '1' >"${tmp_exit}" ) &
+      task_pid=$!
+
+      p="${pct_start}"
+      while kill -0 "${task_pid}" 2>/dev/null; do
+        printf '%d\n' "${p}"
+        sleep 0.5
+
+        if (( p < pct_end - 1 )); then
+          p=$(( p + 1 ))
+        fi
+      done
+
+      wait "${task_pid}" || true
+
+      if [[ "$(<"${tmp_exit}")" == '1' ]]; then
+        log_msg "Failed Task: ${label}"
+        printf 'XXX\n%d\nFAILED: %s\nXXX\n' "${pct_end}" "${label}"
+        sleep 2
+        break
+      fi
+
+      log_msg "Completed Task: ${label}"
+      printf '%d\n' "${pct_end}"
+    done
+
+    if [[ "$(<"${tmp_exit}")" == '0' ]]; then
+      printf 'XXX\n100\nDone!\nXXX\n'
+      sleep 1
+    fi
+  } | whiptail --title "${title}" --gauge "Starting..." 8 65 0
+
+  local final_exit=1
+  if [[ -f "${tmp_exit}" ]]; then
+    final_exit="$(<"${tmp_exit}")"
+  fi
+
+  return "${final_exit}"
+}
+
+setup_storage() {
+  if [[ -L "$HOME/storage/shared" && -d "$HOME/storage/shared" ]]; then
+    info "Storage already set up."
+    return 0
+  fi
+
+  info "Storage not set up. Requesting permission..."
+  termux-setup-storage
+  sleep 5
+
+  if [[ -L "$HOME/storage/shared" && -d "$HOME/storage/shared" ]]; then
+    info "Storage set up successfully."
+    return 0
+  else
+    err "Storage setup failed — did you accept the permission dialog?"
+    return 1
+  fi
+}
+
+get_jellyfin_token() {
+  local jellyfin_user=$1
+  local jellyfin_password=$2
+  local response
+  local msg_error
+  local payload
+  local auth_header
+  local client="Jellyfin Setup Wizard"
+  local device="Local"
+  local device_id="127-0-0-1"
+  local version="1.0.0"
+
+  auth_header=$(jq -nr \
+  --arg client "$client" \
+  --arg device "$device" \
+  --arg dev_id "$device_id" \
+  --arg ver "$version" \
+  '"MediaBrowser Client=\($client), Device=\($device), DeviceId=\($dev_id), Version=\($ver)"')
+
+  payload=$(jq -n \
+    --arg user "$jellyfin_user" \
+    --arg pass "$jellyfin_password" \
+    '{Username: $user, Pw: $pass}')
+
+  read -r -d '' msg_error << EOF || true
+Failed to get token. Check your credentials.
+EOF
+
+  if response=$(curl -sSL \
+    -X POST "${JELLYFIN_URL}/Users/AuthenticateByName" \
+    -H "Authorization: ${auth_header}" \
+    -H "Content-Type: application/json" \
+    -d "${payload}"); then
+    log_msg "Token acquired successfully"
+  else
+    err "${msg_error}"
+    return 1
+  fi
+
+  local token
+  token=$(printf "%s" "$response" | jq -r '.AccessToken // empty')
+
+  if [[ -z "${token}" ]]; then
+    err "${msg_error}"
+    return 1
+  fi
+
+  printf '%s\n' "${token}"
+}
+
+generate_auth_file() {
+    local token="$1"
+    local temp_file
+
+    if ! temp_file=$(mktemp -t jellyfin_auth.XXXXXX); then
+        err "Failed to create temporary file."
+        return 1
+    fi
+
+    chmod 600 "${temp_file}"
+    printf 'Authorization: MediaBrowser Token="%s"\n' "${token}" > "${temp_file}"
+    printf '%s\n' "$temp_file"
+    return 0
+}
+
+check_jellyfin_tasks() {
+  [[ -f "${SCHEDULED_TASKS_FLAG_FILE}" ]]
+}
+
+check_jellyfin_users() {
+  local auth_file="$1"
+  local all_disabled
+  local response
+
+  if response=$(curl -sS \
+    -H "@${auth_file}" \
+    -H "Content-Type: application/json" \
+    -w "\n%{http_code}" \
+    "${JELLYFIN_URL}/Users"); then
+    log_msg "Retrieved response from /Users"
+  else
+    err "Failed to reach /Users"
+    return 1
+  fi
+  local users
+  users=$(printf "%s" "$response" | head -n -1)
+  log_msg "Checking Transcode Policy for last user"
+
+  all_disabled=$(printf "%s" "${users}" | jq '
+    [.[-1].Policy |
+      .EnableVideoPlaybackTranscoding,
+      .EnableAudioPlaybackTranscoding,
+      .ForceRemoteSourceTranscoding
+    ] | all(. == false)')
+
+  [[ "${all_disabled}" == "true" ]]
+}
+
+require_jellyfin_token() {
+  local -r feature="$1"
+  local auth_file="$2"
+  local msg_require
+  read -r -d '' msg_require << EOF || true
+
+To access $feature, you must complete the initial setup of Jellyfin,
+open this phone's web browser and go to http://localhost:8096 or
+your phone's IP address on port 8096.
+EOF
+
+  if [[ "${auth_file}" == "0" ]]; then
+    whiptail --title "Jellyfin Token Required" \
+      --msgbox "${msg_require}" 12 65
+    return 1
+  fi
+}
+
+action_install_jellyfin() {
+  if ! grep -q "DOTNET_ROOT" "$HOME/.bashrc"; then
+    cat << EOF >> "$HOME/.bashrc"
+export DOTNET_ROOT=$PREFIX/lib/dotnet
+export LD_LIBRARY_PATH=$PREFIX/lib
+EOF
+  fi
+
+  export DOTNET_ROOT=$PREFIX/lib/dotnet
+  export LD_LIBRARY_PATH=$PREFIX/lib
+
+  run_with_progress 'Installing Jellyfin' \
+    'Optimizing Jellyfin Configuration:_task_optimize_jellyfin' \
+    'Updating package list:_task_pkg_update' \
+    'Upgrading system:_task_pkg_upgrade' \
+    'Installing Jellyfin Media Server:_task_install_jellyfin_deps' \
+    'Creating Boot Script:_task_create_jellyfin_autostart'
+}
+
+action_install_dependencies() {
+  if are_termux_deps_installed; then
+    return 0
+  fi
+
+  local missing_packages
+  missing_packages=()
+
+  if ! is_whiptail_installed; then
+    missing_packages+=("whiptail")
+  fi
+
+  if ! is_openssh_installed; then
+    missing_packages+=("openssh")
+  fi
+
+  if ! is_jq_installed; then
+    missing_packages+=("jq")
+  fi
+
+  if [[ ${#missing_packages[@]} -gt 0 ]]; then
+    printf "Missing packages to install: %s\n" "${missing_packages[*]}"
+    _task_install_script_deps "${missing_packages[@]}" || return 1
+
+    mkdir -p "$HOME/.termux/boot/"
+    _task_create_termux_autostart || return 1
+    _task_create_openssh_autostart || return 1
+
+    mkdir -p "${PROVISION_DIR}"
+    touch "${DEPS_FLAG_FILE}"
+    printf "Enter the command: passwd\n"
+  fi
+}
+
+action_setup_dlna() {
+  local -r auth_file="$1"
+  run_with_progress 'Installing DLNA Plugin' \
+    "Installing DLNA Plugin:action_install_dlna '${auth_file}'" \
+    "Restarting Jellyfin:action_restart_jellyfin '${auth_file}'" \
+    'Starting Jellyfin:is_jellyfin_online' \
+    "Verifying Installation:is_dlna_installed '${auth_file}'"
+}
+
+action_restart_jellyfin() {
+  local auth_file="$1"
+  local response
+
+  response=$(curl -fsSL \
+    -X POST \
+    -H "@${auth_file}" \
+    -H "Content-Type: application/json" \
+    "${JELLYFIN_URL}/System/Restart")
+
+  log_msg "${response}"
+}
+
+action_install_dlna() {
+  local auth_file="$1"
+  local response
+
+  response=$(curl -fsSL \
+    -X POST \
+    -H "@${auth_file}" \
+    -H "Content-Type: application/json" \
+    "${JELLYFIN_URL}/Packages/Installed/DLNA")
+  log_msg "${response}"
+}
+
+action_configure_transcoder() {
+  local auth_file="$1"
+  local users
+  local users_ids
+
+  if users=$(curl -fsSL \
+    -H "@${auth_file}" \
+    -H "Content-Type: application/json" \
+    "${JELLYFIN_URL}/Users"); then
+    log_msg "Retrieved response from /Users"
+  else
+    err "Failed to reach /Users"
+    return 1
+  fi
+
+  users_ids=$(printf "%s" "${users}" \
+    | jq -r '.[].Id')
+
+  for user_id in $users_ids; do
+    local user
+    user=$(curl -fsSL \
+      -H "@${auth_file}" \
+      -H "Content-Type: application/json" \
+      "${JELLYFIN_URL}/Users/${user_id}")
+
+    local trancode_policy
+    trancode_policy=$(printf "%s" "${user}" \
+      | jq '.Policy |
+      .EnableVideoPlaybackTranscoding = false |
+      .EnableAudioPlaybackTranscoding = false |
+      .ForceRemoteSourceTranscoding   = false')
+
+    local response
+    if response=$(curl -fsSL \
+      -X POST \
+      -H "@${auth_file}" \
+      -H "Content-Type: application/json" \
+      -d "${trancode_policy}" \
+      "${JELLYFIN_URL}/Users/${user_id}/Policy"); then
+      log_msg "Disabled transcoding for ${user_id}"
+    else
+      err "Unable to disable transcoding for ${user_id}"
+      return 1
+    fi
+  done
+}
+
+action_configure_tasks() {
+  local auth_file="$1"
+  local tasks
+  local task_id
+  local check_task
+  local current
+
+  local -a tasks_to_disable
+
+  if tasks=$(curl -fsSL \
+    -H "@${auth_file}" \
+    -H "Content-Type: application/json" \
+    "${JELLYFIN_URL}/ScheduledTasks"); then
+    log_msg "Retreived scheduled tasks"
+  else
+    err "Unable to reach /ScheduledTasks"
+    return 1
+  fi
+
+  if printf "%s" "${tasks}" | grep -q "Unauthorized"; then
+    err "Unauthorized: API Key (Not Admin)"
+    return 1
+  fi
+
+  tasks_to_disable=(
+    "Audio Normalization"
+    "Clean Activity Log"
+    "Clean Cache Directory"
+    "Clean Log Directory"
+    "Clean Transcode Directory"
+    "Clean up collections and playlists"
+    "Download missing lyrics"
+    "Download missing subtitles"
+    "Extract Chapter Images"
+    "Generate Trickplay Images"
+    "Keyframe Extractor"
+    "Media Segment Scan"
+    "Migrate Trickplay Image Location"
+    "Optimize database"
+    "Refresh People"
+    "Scan Media Library"
+    "Update Plugins"
+    "User data cleanup task"
+  )
+
+
+  declare -A tasks_to_enable=(
+    ["Scan Media Library"]='[{"Type":"StartupTrigger"}]'
+    ["Clean Transcode Directory"]='[{"Type":"WeeklyTrigger", "TimeOfDayTicks":0, "DayOfWeek":"Monday"}]'
+    ["Clean Cache Directory"]='[{"Type":"WeeklyTrigger", "TimeOfDayTicks":0, "DayOfWeek":"Tuesday"}]'
+    ["Clean Log Directory"]='[{"Type":"WeeklyTrigger", "TimeOfDayTicks":0, "DayOfWeek":"Wednesday"}]'
+    ["Optimize database"]='[{"Type":"IntervalTrigger", "IntervalTicks":25920000000000}]'
+  )
+
+  for task_name in "${tasks_to_disable[@]}"; do
+    task_id=$(printf "%s" "$tasks" | \
+      jq -r --arg name "$task_name" '.[] | select(.Name == $name) | .Id')
+
+    if [[ -z "${task_id}" ]]; then
+      log_msg "'${task_name}' — task not found"
+      continue
+    fi
+
+    local disabled_response
+    if disabled_response=$(curl -fsSL \
+      -X POST \
+      -H "@${auth_file}" \
+      -H "Content-Type: application/json" \
+      -d '[]' \
+      "${JELLYFIN_URL}/ScheduledTasks/${task_id}/Triggers"); then
+      log_msg "Requested ${task_id} to be disabled"
+    fi
+
+    check_task=$(curl -fsSL \
+      -H "@${auth_file}" \
+      "${JELLYFIN_URL}/ScheduledTasks/${task_id}")
+
+    current=$(printf "%s" "${check_task}" \
+      | jq '.Triggers | length')
+    if [[ "${current}" == "0" ]]; then
+      log_msg "'${task_name}' - disabled"
+    else
+      err "'${task_name}' - still enabled"
+      return 1
+    fi
+  done
+
+  log_msg "Configuring Scheduled Tasks"
+
+  for task_name in "${!tasks_to_enable[@]}"; do
+    task_id=$(printf "%s" "$tasks" | \
+      jq -r --arg name "$task_name" '.[] | select(.Name == $name) | .Id')
+
+    if [[ -z "${task_id}" ]]; then
+      log_msg "'${task_name}' — task not found"
+      continue
+    fi
+
+    local payload="${tasks_to_enable[$task_name]}"
+
+    local enabled_response
+    if enabled_response=$(curl -fsSL \
+      -X POST \
+      -H "@${auth_file}" \
+      -H "Content-Type: application/json" \
+      -d "${payload}" \
+      "${JELLYFIN_URL}/ScheduledTasks/${task_id}/Triggers" > /dev/null); then
+      log_msg "${task_name} configured successfully"
+    else
+      err "Failed to configure '${task_name}'"
+      return 1
+    fi
+  done
+
+  mkdir -p "${PROVISION_DIR}"
+  touch "${SCHEDULED_TASKS_FLAG_FILE}"
+}
+
+action_create_shows() {
+  local sd_card_dir
+  sd_card_dir=$(detect_sd_card)
+  mkdir -p "/storage/$sd_card_dir/${TERMUX_DIR}/${SHOWS_DIR}"
+}
+
+action_create_movies() {
+  local sd_card_dir
+  sd_card_dir=$(detect_sd_card)
+  mkdir -p "/storage/$sd_card_dir/${TERMUX_DIR}/${MOVIES_DIR}"
+}
+
+action_create_media_library() {
+  local -r name="$1"
+  local -r auth_file="$2"
+  local type
+  local location
+  local -r language="${LIBRARY_LANGUAGE}"
+  local -r country="${LIBRARY_COUNTRY}"
+  local payload
+  local sd_card_id
+
+  sd_card_id=$(detect_sd_card)
+  local base_dir="/storage/$sd_card_id/"
+  case "${name}" in
+    "${MOVIES_NAME}")
+      type="${MOVIES_TYPE}"
+      location="${base_dir}${TERMUX_DIR}/${MOVIES_DIR}"
+      ;;
+    "${SHOWS_NAME}")
+      type="${SHOWS_TYPE}"
+      location="${base_dir}${TERMUX_DIR}/${SHOWS_DIR}"
+      ;;
+    *)
+      err "Unknown library name: '${name}'."
+      return 1
+      ;;
+  esac
+
+  payload=$(jq -n \
+    --arg lang "${language}" \
+    --arg country "${country}" \
+    --arg path "${location}" \
+    '{
+      LibraryOptions: {
+        PreferredMetadataLanguage: $lang,
+        MetadataCountryCode: $country,
+        EnableRealtimeMonitor: false,
+        MetadataSavers: [],
+        LocalMetadataReaderOrder: [],
+        SubtitleDownloadLanguages: [],
+        TypeOptions: [],
+        PathInfos: [{ Path: $path }]
+      }
+    }')
+
+  local msg_error
+
+  read -r -d '' msg_error << EOF || true
+Failed to create library ${name}.
+EOF
+
+  local enc_name
+  local enc_type
+  local enc_loc
+  enc_name=$(printf '%s' "${name}" | jq -sRr @uri)
+  enc_type=$(printf '%s' "${type}" | jq -sRr @uri)
+  enc_loc=$(printf '%s' "${location}" | jq -sRr @uri)
+
+
+  local api_url
+  api_url="${JELLYFIN_URL}/Library/VirtualFolders"
+  api_url+="?name=${enc_name}"
+  api_url+="&collectionType=${enc_type}"
+  api_url+="&paths=${enc_loc}"
+  api_url+="&refreshLibrary=false"
+
+  local response
+  local http_code
+  response=$(curl -sSL \
+    -X POST \
+    -H "@${auth_file}" \
+    -H "Content-Type: application/json" \
+    -d "${payload}" \
+    -w "\n%{http_code}" \
+    "${api_url}")
+  http_code=$(tail -n1 <<< "${response}")
+  response=$(head -n-1 <<< "${response}")
+
+  if [[ ! "${http_code}" =~ ^2 ]]; then
+    err "Failed to create ${name}: HTTP ${http_code} — ${response}"
+    return 1
+  fi
+
+  log_msg "Library ${name} created (HTTP ${http_code})"
+
+  mkdir -p "${PROVISION_DIR}"
+  if [[ "${name}" == "${SHOWS_NAME}" ]]; then
+    touch "${CREATED_TV_FLAG_FILE}"
+  else
+    touch "${CREATED_MOVIE_FLAG_FILE}"
+  fi
+
+  local target_dir
+  target_dir="${base_dir}${TERMUX_DIR}/media"
+  local symlink_dir
+  symlink_dir="$HOME/media"
+  if [[ ! -e "${symlink_dir}" ]]; then
+    ln -s "${target_dir}" "${symlink_dir}"
+    log_msg "Created symlink successfully"
+  else
+    log_msg "Symlink or directory already exists"
+  fi
+}
+
+action_create_movies_library() {
+  action_create_media_library "${MOVIES_NAME}" "$1"
+}
+
+action_create_shows_library() {
+  action_create_media_library "${SHOWS_NAME}" "$1"
+}
+
+# ==============================================================================
+# SUBMENU HANDLERS
+# ==============================================================================
+
+show_menu() {
+  local -r title="$1"
+  local -r prompt="$2"
+  local -r height="$3"
+  local -r width="$4"
+  local -r menu_height="$5"
+  shift 5
+
+  whiptail --title "${title}" \
+           --menu "${prompt}" \
+           "${height}" "${width}" "${menu_height}" \
+           "$@" \
+           3>&1 1>&2 2>&3
+}
+
+submenu_create_media_folders() {
+  local -r title_movies="Create Movies Folder"
+  local msg_movies
+  read -r -d '' msg_movies << EOF || true
+This will create the Movies library folder at:
+  • ${MOVIES_DIR}
+EOF
+
+  local -r title_shows="Create Shows Folder"
+  local msg_shows
+  read -r -d '' msg_shows << EOF || true
+This will create the TV Shows library folder at:
+  • ${SHOWS_DIR}
+EOF
+
+  local -r title_all="Create All Media Folders"
+  local msg_all
+  read -r -d '' msg_all << EOF || true
+This will create the complete directory structure at
+once:
+  1. ${MOVIES_DIR}
+  2. ${SHOWS_DIR}
+EOF
+
+  local s_movies
+  local s_shows
+  local choice
+  local -a pending_tasks
+
+  setup_storage
+
+  while true; do
+    s_movies="[ ]"
+    is_movies_dir && s_movies="[X]"
+
+    s_shows="[ ]"
+    is_shows_dir && s_shows="[X]"
+
+    pending_tasks=()
+    is_movies_dir  || pending_tasks+=("action_create_movies")
+    is_shows_dir   || pending_tasks+=("action_create_shows")
+
+    if ! choice=$(show_menu "Create Media Folders" "Select an option:" 16 65 5 \
+      "1" "${s_movies} ${title_movies}" \
+      "2" "${s_shows} ${title_shows}" \
+      "3" "${title_all}" \
+      "4" "Back to Main Menu"); then
+      break
+    fi
+
+    case "${choice}" in
+      1) run_task "${title_movies}" "${msg_movies}" is_movies_dir action_create_movies ;;
+      2) run_task "${title_shows}" "${msg_shows}" is_shows_dir action_create_shows ;;
+      3)
+        if [[ "${#pending_tasks[@]}" -eq 0 ]]; then
+          whiptail --title "Already Configured" \
+            --msgbox "All directories are already created!" 8 55
+        else
+          execute_batch_tasks "${title_all}" "${msg_all}" "${pending_tasks[@]}"
+        fi
+        ;;
+      4) break ;;
+      *) break ;;
+    esac
+  done
+}
+
+submenu_install_jellyfin() {
+  local -r title_install="Install Jellyfin Media Server"
+  local msg_install
+  read -r -d '' msg_install << EOF || true
+This will install the latest Jellyfin package via pkg.
+EOF
+
+  local s_install
+  local choice
+
+  while true; do
+    s_install="[ ]"
+    is_jellyfin_installed && s_install="[X]"
+
+    choice=$(show_menu "Install Jellyfin" "Select an option:" 16 65 4 \
+      "1" "${s_install} ${title_install}" \
+      "2" "Back to Main Menu") || break
+
+    case "${choice}" in
+      1) run_task "${title_install}" "${msg_install}" is_jellyfin_installed action_install_jellyfin ;;
+      2) break ;;
+      *) break ;;
+    esac
+  done
+}
+
+submenu_create_media_libraries() {
+  require_jellyfin_token "Create Media Libraries" "$1"
+  local auth_file="$1"
+
+  if ! is_movies_dir && ! is_shows_dir; then
+    local msg_create
+    read -r -d '' msg_create << EOF || true
+Media folders have not been created yet.
+Please create your media folders first.
+EOF
+
+    whiptail --title "Create Media Libraries" \
+      --msgbox "${msg_create}" 10 55
+    return 0
+  fi
+
+  local -r title_movies="Create Movies Library"
+  local msg_movies
+  read -r -d '' msg_movies << EOF || true
+This will Create a new 'Movies' section to Jellyfin:
+EOF
+
+  local -r title_shows="Create TV Shows Library"
+  local msg_shows
+  read -r -d '' msg_shows << EOF || true
+This will Create a new 'TV Shows' section to Jellyfin:
+EOF
+
+  local -r title_all="Create All Jellyfin Libraries"
+  local msg_all
+  read -r -d '' msg_all << EOF || true
+This will create both libraries:
+  1. Movies (${MOVIES_DIR})
+  2. TV Shows (${SHOWS_DIR})
+EOF
+
+  local s_movies
+  local s_shows
+  local choice
+  local -a pending_tasks
+
+  while true; do
+    s_movies="[ ]"
+    is_movie_library_created && s_movies="[X]"
+
+    s_shows="[ ]"
+    is_show_library_created && s_shows="[X]"
+
+    pending_tasks=()
+    is_movie_library_created || pending_tasks+=("action_create_movies_library ${auth_file}")
+    is_show_library_created  || pending_tasks+=("action_create_shows_library ${auth_file}")
+
+    if ! choice=$(show_menu "Create Media Libraries" "Select an option:" 15 65 4 \
+      "1" "${s_movies} ${title_movies}" \
+      "2" "${s_shows} ${title_shows}" \
+      "3" "${title_all}" \
+      "4" "Back to Main Menu"); then
+      break
+    fi
+
+    case "${choice}" in
+      1) run_task "${title_movies}" "${msg_movies}" is_movie_library_created action_create_movies_library "${auth_file}" ;;
+      2) run_task "${title_shows}" "${msg_shows}" is_show_library_created action_create_shows_library "${auth_file}" ;;
+      3)
+        if [[ "${#pending_tasks[@]}" -eq 0 ]]; then
+          whiptail --title "Already Configured" \
+            --msgbox "All Jellyfin libraries are already created!" 8 55
+        else
+          execute_batch_tasks "${title_all}" "${msg_all}" "${pending_tasks[@]}"
+        fi
+        ;;
+      4) break ;;
+      *) break ;;
+    esac
+  done
+}
+
+submenu_configure_jellyfin_settings() {
+  require_jellyfin_token "Jellyfin Configurations" "$1"
+  local auth_file="$1"
+  local -r title_transcoder="Transcoder Policies"
+  local msg_transcoder
+  local -r title_tasks="Scheduled Tasks Settings"
+  local msg_tasks
+  local -r title_dlna="Install DLNA Plugin"
+  local msg_dlna
+  local -r title_all="Apply All Jellyfin Configurations"
+  local msg_all
+
+  read -r -d '' msg_transcoder << EOF || true
+Configures Video & Audio Playback
+Transcoding, and Video Playback Remuxing.
+EOF
+
+  read -r -d '' msg_tasks << EOF || true
+Configures the following:
+"Audio Normalization",
+"Download Missing Lyrics",
+"Download Missing Subtitles",
+"Extract Chapter Images",
+"Generate Trickplay",
+"Keyframe",
+"Media Scan Segment",
+"Refresh People",
+"Migrate Trickplay"
+EOF
+
+  read -r -d '' msg_dlna << EOF || true
+Installs DLNA Plugin for Jellyfin.
+Restarts Jellyfin to finalize Plugin
+installation.
+EOF
+
+  read -r -d '' msg_all << EOF || true
+This will configure the following:
+  1. Scheduled Tasks Settings
+  2. Transcoder Policies
+  3. DLNA Plugin
+EOF
+
+  local s_trans
+  local s_tasks
+  local s_dlna
+  local trans_ok
+  local tasks_ok
+  local dlna_ok
+  local choice
+  local -a pending_tasks
+
+  while true; do
+    check_jellyfin_tasks "${auth_file}" \
+      && tasks_ok=1 || tasks_ok=0
+    check_jellyfin_users "${auth_file}" \
+      && trans_ok=1 || trans_ok=0
+    is_dlna_installed "${auth_file}" \
+      && dlna_ok=1 || dlna_ok=0
+    s_tasks="[ ]"
+      [[ "${tasks_ok}" -eq 1 ]] && s_tasks="[X]"
+    s_trans="[ ]"
+      [[ "${trans_ok}" -eq 1 ]] && s_trans="[X]"
+    s_dlna="[ ]"
+      [[ "${dlna_ok}" -eq 1 ]] && s_dlna="[X]"
+
+    pending_tasks=()
+      [[ "${tasks_ok}" -eq 0 ]] && pending_tasks+=("action_configure_tasks ${auth_file}")
+      [[ "${trans_ok}" -eq 0 ]] && pending_tasks+=("action_configure_transcoder ${auth_file}")
+      [[ "${dlna_ok}" -eq 0 ]] && pending_tasks+=("action_setup_dlna ${auth_file}")
+
+    if ! choice="$(show_menu "Configure Jellyfin Settings" "Select an option:" 18 65 8 \
+      "1" "${s_tasks} ${title_tasks}" \
+      "2" "${s_trans} ${title_transcoder}" \
+      "3" "${s_dlna} ${title_dlna}" \
+      "4" "${title_all}" \
+      "5" "Back to Main Menu")"; then
+      break
+    fi
+
+    case "${choice}" in
+      1)
+        run_task "${title_tasks}" "${msg_tasks}" \
+          check_jellyfin_tasks action_configure_tasks "${auth_file}" ;;
+      2)
+        run_task "${title_transcoder}" "${msg_transcoder}" \
+          check_jellyfin_users action_configure_transcoder "${auth_file}" ;;
+      3)
+        run_task "${title_dlna}" "${msg_dlna}" \
+          is_dlna_installed action_setup_dlna "${auth_file}" ;;
+      4)
+        if [[ "${#pending_tasks[@]}" -eq 0 ]]; then
+          whiptail --title "Already Configured" \
+            --msgbox "All Jellyfin settings are already configured!" 8 55
+        else
+          execute_batch_tasks "${title_all}" "${msg_all}" "${pending_tasks[@]}"
+        fi
+        ;;
+      5) break ;;
+      *) break ;;
+    esac
+  done
+}
+
+# ==============================================================================
+# MAIN MENU & MAIN FUNCTION
+# ==============================================================================
+
+show_main_menu() {
+  local auth_file="$1"
+  local choice
+
+  while true; do
+    if ! choice=$(show_menu "Jellyfin Setup Wizard" "Select a module to configure:" 18 68 7 \
+      "1" "Create Media Folders" \
+      "2" "Install Jellyfin" \
+      "3" "Create Media Libraries" \
+      "4" "Configure Jellyfin Settings" \
+      "5" "Exit Wizard"); then
+      break
+    fi
+
+    case "${choice}" in
+      1) submenu_create_media_folders ;;
+      2) submenu_install_jellyfin ;;
+      3) submenu_create_media_libraries "${auth_file}" ;;
+      4) submenu_configure_jellyfin_settings "${auth_file}" ;;
+      5) break ;;
+      *) break ;;
+    esac
+  done
+}
+
+main() {
+  local auth_file
+  local ip_address
+  mkdir -p "${APP_DIR}" || { printf 'ERROR: Could not create %s\n' "${APP_DIR}" >&2; exit 1; }
+
+  ip_address=$(ifconfig 2>/dev/null \
+    | awk '/^wlan0/{f=1} f && /inet /{print $2; exit} /^$/{f=0}')
+
+
+  log_msg "=== Setup Jellyfin Wizard Session Started ==="
+
+  local msg_deps
+  read -r -d '' msg_deps << EOF || true
+ERROR: Failed to install initial script dependencies.
+EOF
+
+  if ! action_install_dependencies; then
+    printf '%s\n' "${msg_deps}"
+    exit 1
+  fi
+
+  if is_jellyfin_installed; then
+    local setup_status
+    setup_status=$(curl -fsSL \
+    "$JELLYFIN_URL/System/Info/Public" \
+    | jq -r '.StartupWizardCompleted // "unknown"') || setup_status="unknown"
+
+    if [[ "${setup_status}" == "true" ]]; then
+      info "Jellyfin is configured. An admin account exists."
+      local username
+      local password
+      local token
+
+      if ! username=$(whiptail --title "Generate Temporary Token" \
+        --inputbox "Enter Jellyfin Username:" 8 55 \
+        3>&1 1>&2 2>&3) || [[ -z "${username}" ]]; then
+        return 1
+      fi
+
+      if ! password=$(whiptail --title "Generate Temporary Token" \
+        --passwordbox "Enter Jellyfin Password:" 8 55 \
+        3>&1 1>&2 2>&3) || [[ -z "${password}" ]]; then
+        return 1
+      fi
+
+      if ! token=$(get_jellyfin_token "$username" "$password"); then
+        err "Could not acquire jellyfin token."
+        return 1
+      fi
+
+      auth_file=$(generate_auth_file "${token}")
+      trap 'rm -f "${auth_file}"' RETURN
+      show_main_menu "${auth_file}"
+    elif [[ "${setup_status}" == "false" ]]; then
+      info "Jellyfin is unconfigured. An admin account is absent."
+      auth_file="0"
+      show_main_menu "${auth_file}"
+    else
+      info "Could not reach Jellyfin or received an invalid response."
+      auth_file="0"
+      show_main_menu "${auth_file}"
+    fi
+  else
+    auth_file="0"
+    show_main_menu "${auth_file}"
+  fi
+
+  clear
+  info "Setup wizard closed."
+  if [ -z "${ip_address}" ]; then
+    info "Could not find IP address"
+  else
+    info "IP address: ${ip_address}"
+  fi
+
+  log_msg "=== Setup Jellyfin Wizard Session Closed ==="
+  return 0
+}
+
+# ==============================================================================
+# INVOCATION
+# ==============================================================================
+
+main "$@"
