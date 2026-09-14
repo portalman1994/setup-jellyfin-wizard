@@ -61,6 +61,18 @@ readonly SHOWS_NAME="Shows"
 readonly SHOWS_TYPE="tvshows"
 
 readonly TERMUX_DIR="Android/data/com.termux/files"
+
+# ==============================================================================
+# TERMUX-AWARE SIZING
+# Uses tput (reads kernel TIOCGWINSZ) so values are correct after rotation.
+# ==============================================================================
+_wt_h()  { local l; l=$(tput lines 2>/dev/null || echo 24);
+            printf '%d' $(( l > 14 ? l - 4 : 10 )); }
+_wt_w()  { local c; c=$(tput cols  2>/dev/null || echo 80);
+            printf '%d' $(( c > 48 ? c - 4 : 44 )); }
+_wt_lh() { local h; h=$(_wt_h);
+            printf '%d' $(( h > 12 ? h - 8 : 4  )); }
+
 # ==============================================================================
 # STATE & HELPER FUNCTIONS
 # ==============================================================================
@@ -187,7 +199,7 @@ err() {
   log_msg "ERROR: ${msg}"
 
   if [[ -t 1 ]] && is_whiptail_installed; then
-    whiptail --title " Error " --msgbox "${msg}" 10 60
+    whiptail --title " Error " --msgbox "${msg}" "$(_wt_h)" "$(_wt_w)"
   fi
 }
 
@@ -197,7 +209,7 @@ info() {
   log_msg "INFO: ${msg}"
 
   if [[ -t 1 ]] && is_whiptail_installed; then
-    whiptail --title " Information " --msgbox "${msg}" 10 60
+    whiptail --title " Information " --msgbox "${msg}" "$(_wt_h)" "$(_wt_w)"
   fi
 }
 
@@ -287,24 +299,52 @@ ${synopsis}
 
 Do you want to proceed?
 EOF
-
-  whiptail --title "${title}" \
-    --yesno "${msg_proceed}" 12 60
+  local _pid _resized _ec
+  while true; do
+    _resized=0
+    whiptail --title "${title}" \
+      --yesno "${msg_proceed}" \
+      "$(_wt_h)" "$(_wt_w)" &
+    _pid=$!
+    trap '_resized=1; kill "${_pid}" 2>/dev/null' SIGWINCH
+    wait "${_pid}" && _ec=0 || _ec=$?
+    trap - SIGWINCH
+    [[ ${_resized} -eq 1 ]] && { sleep 0.15; continue; }
+    return "${_ec}"
+  done
 }
 
 notify_success() {
   local -r title="$1"
   local -r message="$2"
-
-  whiptail --title "${title} - Success" \
-    --msgbox "${message}" 8 55
+  local _pid _resized _ec
+  while true; do
+    _resized=0
+    whiptail --title "${title} - Success" \
+      --msgbox "${message}" "$(_wt_h)" "$(_wt_w)" &
+    _pid=$!
+    trap '_resized=1; kill "${_pid}" 2>/dev/null' SIGWINCH
+    wait "${_pid}" && _ec=0 || _ec=$?
+    trap - SIGWINCH
+    [[ ${_resized} -eq 1 ]] && { sleep 0.15; continue; }
+    return "${_ec}"
+  done
 }
 
 notify_skipped() {
   local -r title="$1"
-
-  whiptail --title "${title} - Skipped" \
-    --msgbox "No changes were made." 8 55
+  local _pid _resized _ec
+  while true; do
+    _resized=0
+    whiptail --title "${title} - Skipped" \
+      --msgbox "No changes were made." "$(_wt_h)" "$(_wt_w)" &
+    _pid=$!
+    trap '_resized=1; kill "${_pid}" 2>/dev/null' SIGWINCH
+    wait "${_pid}" && _ec=0 || _ec=$?
+    trap - SIGWINCH
+    [[ ${_resized} -eq 1 ]] && { sleep 0.15; continue; }
+    return "${_ec}"
+  done
 }
 
 run_task() {
@@ -342,12 +382,12 @@ execute_batch_tasks() {
   if confirm_action "${title}" "${synopsis}"; then
     if [[ "${#actions[@]}" -eq 0 ]]; then
       whiptail --title "Notice" \
-        --msgbox "No actions were selected to run." 8 55
+        --msgbox "No actions were selected to run." "$(_wt_h)" "$(_wt_w)"
       return 0
     fi
 
     whiptail --title "Working" \
-      --infobox "Applying batch configurations..." 8 55
+      --infobox "Applying batch configurations..." "$(_wt_h)" "$(_wt_w)"
 
     for action_func in "${actions[@]}"; do
       [[ -z "${action_func}" ]] && continue
@@ -357,12 +397,12 @@ execute_batch_tasks() {
         log_msg "Executing batch action: ${action_func}"
         if ! eval "${action_func}"; then
           whiptail --title "Error" \
-            --msgbox "Batch process failed while running '${action_func}'." 8 55
+            --msgbox "Batch process failed while running '${action_func}'." "$(_wt_h)" "$(_wt_w)"
           return 1
         fi
       else
         whiptail --title "Error" \
-          --msgbox "Unknown action handler: '${action_func}'" 8 55
+          --msgbox "Unknown action handler: '${action_func}'" "$(_wt_h)" "$(_wt_w)"
         return 1
       fi
     done
@@ -391,7 +431,6 @@ run_with_progress() {
 
   local tmp_exit
   tmp_exit=$(mktemp) || { printf "Failed to create temporary file.\n" >&2; return 1; }
-  trap 'rm -f "${tmp_exit:-}"' RETURN
 
   printf '0' > "${tmp_exit}"
 
@@ -437,11 +476,12 @@ run_with_progress() {
       printf 'XXX\n100\nDone!\nXXX\n'
       sleep 1
     fi
-  } | whiptail --title "${title}" --gauge "Starting..." 8 65 0
+  } | whiptail --title "${title}" --gauge "Starting..." "$(_wt_h)" "$(_wt_w)" 0
 
   local final_exit=1
   if [[ -f "${tmp_exit}" ]]; then
     final_exit="$(<"${tmp_exit}")"
+    rm -f "${tmp_exit}"
   fi
 
   return "${final_exit}"
@@ -577,7 +617,7 @@ EOF
 
   if [[ "${auth_file}" == "0" ]]; then
     whiptail --title "Jellyfin Token Required" \
-      --msgbox "${msg_require}" 12 65
+      --msgbox "${msg_require}" "$(_wt_h)" "$(_wt_w)"
     return 1
   fi
 }
@@ -964,16 +1004,28 @@ action_create_shows_library() {
 show_menu() {
   local -r title="$1"
   local -r prompt="$2"
-  local -r height="$3"
-  local -r width="$4"
-  local -r menu_height="$5"
-  shift 5
+  shift 5   # drop legacy height/width/menu-height args — now computed dynamically
 
-  whiptail --title "${title}" \
-           --menu "${prompt}" \
-           "${height}" "${width}" "${menu_height}" \
-           "$@" \
-           3>&1 1>&2 2>&3
+  local _tmp _pid _resized _ec _result
+  _tmp=$(mktemp) || return 1
+
+  while true; do
+    _resized=0
+    whiptail --title "${title}" \
+      --menu "${prompt}" \
+      "$(_wt_h)" "$(_wt_w)" "$(_wt_lh)" \
+      "$@" 2>"${_tmp}" &
+    _pid=$!
+    trap '_resized=1; kill "${_pid}" 2>/dev/null' SIGWINCH
+    wait "${_pid}" && _ec=0 || _ec=$?
+    trap - SIGWINCH
+    [[ ${_resized} -eq 1 ]] && { sleep 0.15; continue; }
+    _result=$(<"${_tmp}")
+    rm -f "${_tmp}"
+    printf '%s' "${_result}"
+    return "${_ec}"
+  done
+  rm -f "${_tmp}"
 }
 
 submenu_create_media_folders() {
@@ -1032,7 +1084,7 @@ EOF
       3)
         if [[ "${#pending_tasks[@]}" -eq 0 ]]; then
           whiptail --title "Already Configured" \
-            --msgbox "All directories are already created!" 8 55
+            --msgbox "All directories are already created!" "$(_wt_h)" "$(_wt_w)"
         else
           execute_batch_tasks "${title_all}" "${msg_all}" "${pending_tasks[@]}"
         fi
@@ -1081,7 +1133,7 @@ Please create your media folders first.
 EOF
 
     whiptail --title "Create Media Libraries" \
-      --msgbox "${msg_create}" 10 55
+      --msgbox "${msg_create}" "$(_wt_h)" "$(_wt_w)"
     return 0
   fi
 
@@ -1135,7 +1187,7 @@ EOF
       3)
         if [[ "${#pending_tasks[@]}" -eq 0 ]]; then
           whiptail --title "Already Configured" \
-            --msgbox "All Jellyfin libraries are already created!" 8 55
+            --msgbox "All Jellyfin libraries are already created!" "$(_wt_h)" "$(_wt_w)"
         else
           execute_batch_tasks "${title_all}" "${msg_all}" "${pending_tasks[@]}"
         fi
@@ -1239,7 +1291,7 @@ EOF
       4)
         if [[ "${#pending_tasks[@]}" -eq 0 ]]; then
           whiptail --title "Already Configured" \
-            --msgbox "All Jellyfin settings are already configured!" 8 55
+            --msgbox "All Jellyfin settings are already configured!" "$(_wt_h)" "$(_wt_w)"
         else
           execute_batch_tasks "${title_all}" "${msg_all}" "${pending_tasks[@]}"
         fi
@@ -1313,13 +1365,13 @@ EOF
       local token
 
       if ! username=$(whiptail --title "Generate Temporary Token" \
-        --inputbox "Enter Jellyfin Username:" 8 55 \
+        --inputbox "Enter Jellyfin Username:" "$(_wt_h)" "$(_wt_w)" \
         3>&1 1>&2 2>&3) || [[ -z "${username}" ]]; then
         return 1
       fi
 
       if ! password=$(whiptail --title "Generate Temporary Token" \
-        --passwordbox "Enter Jellyfin Password:" 8 55 \
+        --passwordbox "Enter Jellyfin Password:" "$(_wt_h)" "$(_wt_w)" \
         3>&1 1>&2 2>&3) || [[ -z "${password}" ]]; then
         return 1
       fi
