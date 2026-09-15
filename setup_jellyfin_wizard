@@ -79,7 +79,7 @@ _wt_lh() { local h; h=$(_wt_h);
 
 detect_sd_card() {
   local sd_card_id
-  sd_card_id=$(df -h | grep -oP '/storage/[A-F0-9]{4}-[A-F0-9]{4}' | cut -d'/' -f3)
+  sd_card_id=$(df -h | grep -oP '/storage/[A-F0-9]{4}-[A-F0-9]{4}' | cut -d'/' -f3) || ""
   if [[ -z "${sd_card_id}" ]]; then
     printf "emulated/0"
     return 0
@@ -229,6 +229,10 @@ is_openssh_installed() {
   command -v sshd &>/dev/null
 }
 
+is_ncurses_installed() {
+  command -v tput &>/dev/null
+}
+
 is_jq_installed() {
   command -v jq &>/dev/null
 }
@@ -304,7 +308,7 @@ EOF
     _resized=0
     whiptail --title "${title}" \
       --yesno "${msg_proceed}" \
-      "$(_wt_h)" "$(_wt_w)" &
+      "$(_wt_h)" "$(_wt_w)" >/dev/tty </dev/tty &
     _pid=$!
     trap '_resized=1; kill "${_pid}" 2>/dev/null' SIGWINCH
     wait "${_pid}" && _ec=0 || _ec=$?
@@ -321,7 +325,7 @@ notify_success() {
   while true; do
     _resized=0
     whiptail --title "${title} - Success" \
-      --msgbox "${message}" "$(_wt_h)" "$(_wt_w)" &
+      --msgbox "${message}" "$(_wt_h)" "$(_wt_w)" >/dev/tty </dev/tty &
     _pid=$!
     trap '_resized=1; kill "${_pid}" 2>/dev/null' SIGWINCH
     wait "${_pid}" && _ec=0 || _ec=$?
@@ -337,7 +341,7 @@ notify_skipped() {
   while true; do
     _resized=0
     whiptail --title "${title} - Skipped" \
-      --msgbox "No changes were made." "$(_wt_h)" "$(_wt_w)" &
+      --msgbox "No changes were made." "$(_wt_h)" "$(_wt_w)" >/dev/tty </dev/tty &
     _pid=$!
     trap '_resized=1; kill "${_pid}" 2>/dev/null' SIGWINCH
     wait "${_pid}" && _ec=0 || _ec=$?
@@ -657,6 +661,10 @@ action_install_dependencies() {
     missing_packages+=("openssh")
   fi
 
+  if ! is_ncurses_installed; then
+    missing_packages+=("ncurses-utils")
+  fi
+
   if ! is_jq_installed; then
     missing_packages+=("jq")
   fi
@@ -671,7 +679,6 @@ action_install_dependencies() {
 
     mkdir -p "${PROVISION_DIR}"
     touch "${DEPS_FLAG_FILE}"
-    printf "Enter the command: passwd\n"
   fi
 }
 
@@ -1014,7 +1021,7 @@ show_menu() {
     whiptail --title "${title}" \
       --menu "${prompt}" \
       "$(_wt_h)" "$(_wt_w)" "$(_wt_lh)" \
-      "$@" 2>"${_tmp}" &
+      "$@" 2>"${_tmp}" >/dev/tty </dev/tty &
     _pid=$!
     trap '_resized=1; kill "${_pid}" 2>/dev/null' SIGWINCH
     wait "${_pid}" && _ec=0 || _ec=$?
