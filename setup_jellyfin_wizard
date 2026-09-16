@@ -66,12 +66,26 @@ readonly TERMUX_DIR="Android/data/com.termux/files"
 # TERMUX-AWARE SIZING
 # Uses tput (reads kernel TIOCGWINSZ) so values are correct after rotation.
 # ==============================================================================
-_wt_h()  { local l; l=$(tput lines 2>/dev/null || echo 24);
-            printf '%d' $(( l > 14 ? l - 4 : 10 )); }
-_wt_w()  { local c; c=$(tput cols  2>/dev/null || echo 80);
-            printf '%d' $(( c > 48 ? c - 4 : 44 )); }
-_wt_lh() { local h; h=$(_wt_h);
-            printf '%d' $(( h > 12 ? h - 8 : 4  )); }
+_wt_h() {
+  local l;
+  l=$(tput lines 2>/dev/null || echo 24);
+  printf '%d' $(( l > 14 ? l - 4 : 10 ));
+}
+
+_wt_w() {
+  local c
+  c=$(tput cols 2>/dev/null || echo 80)
+  local w=$(( c - 4 ))
+  (( w < 20 )) && w=$(( c - 2 ))
+  (( w < 10 )) && w=${c}
+  printf '%d' "${w}"
+}
+
+_wt_lh() {
+  local h;
+  h=$(_wt_h);
+  printf '%d' $(( h > 12 ? h - 8 : 4  ));
+}
 
 # ==============================================================================
 # STATE & HELPER FUNCTIONS
@@ -433,6 +447,11 @@ run_with_progress() {
     return 0
   fi
 
+  # Calculate dynamic dimensions live on call
+  local wt_h wt_w
+  wt_h="$(_wt_h)"
+  wt_w="$(_wt_w)"
+
   local tmp_exit
   tmp_exit=$(mktemp) || { printf "Failed to create temporary file.\n" >&2; return 1; }
 
@@ -480,7 +499,7 @@ run_with_progress() {
       printf 'XXX\n100\nDone!\nXXX\n'
       sleep 1
     fi
-  } | whiptail --title "${title}" --gauge "Starting..." "${_wt_h}" "${_wt_w}" 0
+  } | whiptail --title "${title}" --gauge "Starting..." "${wt_h}" "${wt_w}" 0
 
   local final_exit=1
   if [[ -f "${tmp_exit}" ]]; then
