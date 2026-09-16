@@ -114,12 +114,13 @@ _wt_lh() {
 
 detect_sd_card() {
   local sd_card_id
-  sd_card_id=$(df -h | grep -oP '/storage/[A-F0-9]{4}-[A-F0-9]{4}' | cut -d'/' -f3)
-  if [[ -z "${sd_card_id}" ]]; then
-    printf "emulated/0"
+  sd_card_id=$(df -h 2>/dev/null | grep -oP '/storage/[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}' | head -n 1 | cut -d'/' -f3)
+  if [[ -n "${sd_card_id}" ]] && [[ -d "/storage/${sd_card_id}" ]]; then
+    printf "%s" "$sd_card_id"
     return 0
+  else
+    printf "emulated/0"
   fi
-  printf "%s" "$sd_card_id"
 }
 
 _task_pkg_update() {
@@ -248,6 +249,10 @@ info() {
   fi
 }
 
+_sleep() {
+  sleep "$@" 2>/dev/null || /system/bin/sleep "$@" 2>/dev/null || true
+}
+
 # ==============================================================================
 # TASK & ACTION FUNCTIONS
 # ==============================================================================
@@ -341,7 +346,7 @@ is_jellyfin_online() {
       info "Jellyfin did not come back online after ${max_wait}s"
       exit 1
     fi
-    sleep 1
+    _sleep 1
     elapsed=$((elapsed + 1))
     log_msg "Still waiting... (${elapsed}s)"
   done
@@ -366,7 +371,7 @@ EOF
     trap '_resized=1; kill "${_pid}" 2>/dev/null' SIGWINCH
     wait "${_pid}" && _ec=0 || _ec=$?
     trap - SIGWINCH
-    [[ ${_resized} -eq 1 ]] && { sleep 0.15; continue; }
+    [[ ${_resized} -eq 1 ]] && { _sleep 0.15; continue; }
     return "${_ec}"
   done
 }
@@ -383,7 +388,7 @@ notify_success() {
     trap '_resized=1; kill "${_pid}" 2>/dev/null' SIGWINCH
     wait "${_pid}" && _ec=0 || _ec=$?
     trap - SIGWINCH
-    [[ ${_resized} -eq 1 ]] && { sleep 0.15; continue; }
+    [[ ${_resized} -eq 1 ]] && { _sleep 0.15; continue; }
     return "${_ec}"
   done
 }
@@ -399,7 +404,7 @@ notify_skipped() {
     trap '_resized=1; kill "${_pid}" 2>/dev/null' SIGWINCH
     wait "${_pid}" && _ec=0 || _ec=$?
     trap - SIGWINCH
-    [[ ${_resized} -eq 1 ]] && { sleep 0.15; continue; }
+    [[ ${_resized} -eq 1 ]] && { _sleep 0.15; continue; }
     return "${_ec}"
   done
 }
@@ -514,7 +519,7 @@ run_with_progress() {
       p="${pct_start}"
       while kill -0 "${task_pid}" 2>/dev/null; do
         printf '%d\n' "${p}"
-        sleep 0.5
+        _sleep 0.5
 
         if (( p < pct_end - 1 )); then
           p=$(( p + 1 ))
@@ -526,7 +531,7 @@ run_with_progress() {
       if [[ "$(<"${tmp_exit}")" == '1' ]]; then
         log_msg "Failed Task: ${label}"
         printf 'XXX\n%d\nFAILED: %s\nXXX\n' "${pct_end}" "${label}"
-        sleep 2
+        _sleep 2
         break
       fi
 
@@ -536,7 +541,7 @@ run_with_progress() {
 
     if [[ "$(<"${tmp_exit}")" == '0' ]]; then
       printf 'XXX\n100\nDone!\nXXX\n'
-      sleep 1
+      _sleep 1
     fi
   } | whiptail --title "${title}" --gauge "Starting..." "${wt_h}" "${wt_w}" 0
 
@@ -557,7 +562,7 @@ setup_storage() {
 
   info "Storage not set up. Requesting permission..."
   termux-setup-storage
-  sleep 5
+  _sleep 5
 
   if [[ -L "$HOME/storage/shared" && -d "$HOME/storage/shared" ]]; then
     info "Storage set up successfully."
@@ -940,15 +945,23 @@ action_configure_tasks() {
 }
 
 action_create_shows() {
-  local sd_card_dir
-  sd_card_dir=$(detect_sd_card)
-  mkdir -p "/storage/$sd_card_dir/${TERMUX_DIR}/${SHOWS_DIR}"
+  if [[ -d "$HOME/storage/external-1" ]]; then
+    mkdir -p "$HOME/storage/external-1/${SHOWS_DIR}"
+  else
+    local sd_card_dir
+    sd_card_dir=$(detect_sd_card)
+    mkdir -p "/storage/$sd_card_dir/${TERMUX_DIR}/${SHOWS_DIR}"
+  fi
 }
 
 action_create_movies() {
-  local sd_card_dir
-  sd_card_dir=$(detect_sd_card)
-  mkdir -p "/storage/$sd_card_dir/${TERMUX_DIR}/${MOVIES_DIR}"
+  if [[ -d "$HOME/storage/external-1" ]]; then
+    mkdir -p "$HOME/storage/external-1/${MOVIES_DIR}"
+  else
+    local sd_card_dir
+    sd_card_dir=$(detect_sd_card)
+    mkdir -p "/storage/$sd_card_dir/${TERMUX_DIR}/${MOVIES_DIR}"
+  fi
 }
 
 action_create_media_library() {
@@ -1119,7 +1132,7 @@ show_menu() {
     trap '_resized=1; kill "${_pid}" 2>/dev/null' SIGWINCH
     wait "${_pid}" && _ec=0 || _ec=$?
     trap - SIGWINCH
-    [[ ${_resized} -eq 1 ]] && { sleep 0.15; continue; }
+    [[ ${_resized} -eq 1 ]] && { _sleep 0.15; continue; }
     _result=$(<"${_tmp}")
     rm -f "${_tmp}"
     printf '%s' "${_result}"
@@ -1574,7 +1587,7 @@ EOF
       fi
 
       auth_file=$(generate_auth_file "${token}")
-      trap 'rm -f "${auth_file}"' EXIT
+      trap "rm -f \"${auth_file}\"" EXIT
       show_main_menu "${auth_file}"
     elif [[ "${setup_status}" == "false" ]]; then
       info "Jellyfin is unconfigured. An admin account is absent."
