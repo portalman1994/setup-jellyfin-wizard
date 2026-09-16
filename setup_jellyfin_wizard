@@ -480,7 +480,7 @@ run_with_progress() {
       printf 'XXX\n100\nDone!\nXXX\n'
       sleep 1
     fi
-  } | whiptail --title "${title}" --gauge "Starting..." "$(_wt_h)" "$(_wt_w)" 0
+  } | whiptail --title "${title}" --gauge "Starting..." "${_wt_h}" "${_wt_w}" 0
 
   local final_exit=1
   if [[ -f "${tmp_exit}" ]]; then
