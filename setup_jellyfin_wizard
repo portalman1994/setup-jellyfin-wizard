@@ -1082,6 +1082,22 @@ action_download_url() {
 }
 
 # ==============================================================================
+# DOWNLOAD HELPER WRAPPERS
+# ==============================================================================
+
+download_jerky_turkey() {
+  action_download_url "${JERKY_TURKEY_URL}" "${MOVIES_DIR}/${JERKY_TURKEY_DIR}" "${JERKY_TURKEY_DIR}${MP4_EXT}"
+}
+
+download_steamboat_willie() {
+  action_download_url "${STEAMBOAT_WILLIE_URL}" "${MOVIES_DIR}/${STEAMBOAT_WILLIE_DIR}" "${STEAMBOAT_WILLIE_DIR}${MP4_EXT}"
+}
+
+download_superman() {
+  action_download_url "${SUPERMAN_FLEISCHER_URL}" "${SHOWS_DIR}/${SUPERMAN_FLEISCHER_DIR}" "${SUPERMAN_FLEISCHER_FILENAME}${MP4_EXT}"
+}
+
+# ==============================================================================
 # SUBMENU HANDLERS
 # ==============================================================================
 
@@ -1438,9 +1454,9 @@ EOF
     is_superman_dir && s_sm="[X]"
 
     pending_tasks=()
-    is_jerky_turkey_dir || pending_tasks+=("action_download_url ${JERKY_TURKEY_URL} ${MOVIES_DIR}/${JERKY_TURKEY_DIR} ${JERKY_TURKEY_DIR}${MP4_EXT}")
-    is_steamboat_willie_dir || pending_tasks+=("action_download_url ${STEAMBOAT_WILLIE_URL} ${MOVIES_DIR}/${STEAMBOAT_WILLIE_DIR} ${STEAMBOAT_WILLIE_DIR}${MP4_EXT}")
-    is_superman_dir || pending_tasks+=("action_download_url ${SUPERMAN_FLEISCHER_URL} ${SHOWS_DIR}/${SUPERMAN_FLEISCHER_DIR} ${SUPERMAN_FLEISCHER_FILENAME}${MP4_EXT}")
+    is_jerky_turkey_dir || pending_tasks+=("download_jerky_turkey")
+    is_steamboat_willie_dir || pending_tasks+=("download_steamboat_willie")
+    is_superman_dir || pending_tasks+=("download_superman")
 
     if ! choice="$(show_menu "Download Public Domain Media" "Select an option:" \
       "1" "${s_tj} ${title_turkey_jerky}" \
@@ -1453,17 +1469,14 @@ EOF
 
     case "${choice}" in
       1)
-        run_task "${title_turkey_jerky}" "${msg_tj}" is_jerky_turkey_dir \
-          "action_download_url ${JERKY_TURKEY_URL} ${MOVIES_DIR}/${JERKY_TURKEY_DIR} ${JERKY_TURKEY_DIR}${MP4_EXT}"
+        run_task "${title_turkey_jerky}" "${msg_tj}" is_jerky_turkey_dir download_jerky_turkey
         ;;
 
       2)
-        run_task "${title_steamboat_willie}" "${msg_sw}" is_steamboat_willie_dir \
-          "action_download_url ${STEAMBOAT_WILLIE_URL} ${MOVIES_DIR}/${STEAMBOAT_WILLIE_DIR} ${STEAMBOAT_WILLIE_DIR}${MP4_EXT}"
+        run_task "${title_steamboat_willie}" "${msg_sw}" is_steamboat_willie_dir download_steamboat_willie
         ;;
       3)
-        run_task "${title_superman_ep}" "${msg_sm}" is_superman_dir \
-          "action_download_url ${SUPERMAN_FLEISCHER_URL} ${SHOWS_DIR}/${SUPERMAN_FLEISCHER_DIR} ${SUPERMAN_FLEISCHER_FILENAME}${MP4_EXT}"
+        run_task "${title_superman_ep}" "${msg_sm}" is_superman_dir download_superman
         ;;
       4)
         if [[ "${#pending_tasks[@]}" -eq 0 ]]; then
