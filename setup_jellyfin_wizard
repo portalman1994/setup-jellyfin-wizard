@@ -62,14 +62,29 @@ readonly SHOWS_TYPE="tvshows"
 
 readonly TERMUX_DIR="Android/data/com.termux/files"
 
+readonly ARCHIVE_URL="https://archive.org/download/"
+readonly JERKY_TURKEY_URL="${ARCHIVE_URL}jerky-turkey-1945_202406/Jerky%20Turkey%20%281945%29.mp4"
+readonly STEAMBOAT_WILLIE_URL="${ARCHIVE_URL}steamboat-willie-1928_202406/Steamboat%20Willie%20%281928%29.mp4"
+readonly SUPERMAN_FLEISCHER_URL="${ARCHIVE_URL}SupermanCartoonsVideoQualityUpgrades/SupermanmadScientist.mp4"
+readonly JERKY_TURKEY_DIR="Jerky Turkey (1945)"
+readonly STEAMBOAT_WILLIE_DIR="Steamboat Willie (1928)"
+readonly SUPERMAN_FLEISCHER_DIR="Superman (1941)"
+readonly SUPERMAN_FLEISCHER_FILENAME="S01E01"
+readonly MP4_EXT=".mp4"
+
 # ==============================================================================
 # TERMUX-AWARE SIZING
 # Uses tput (reads kernel TIOCGWINSZ) so values are correct after rotation.
 # ==============================================================================
 _wt_h() {
-  local l;
-  l=$(tput lines 2>/dev/null || echo 24);
-  printf '%d' $(( l > 14 ? l - 4 : 10 ));
+  local l
+  l=$(tput lines 2>/dev/null || echo 24)
+  local h=$(( l - 4 ))
+
+  (( h < 10 )) && h=$(( l - 2 ))
+  (( h < 6 )) && h=${l}
+
+  printf '%d' "${h}"
 }
 
 _wt_w() {
@@ -82,9 +97,15 @@ _wt_w() {
 }
 
 _wt_lh() {
-  local h;
-  h=$(_wt_h);
-  printf '%d' $(( h > 12 ? h - 8 : 4  ));
+  local h
+  h=$(_wt_h)
+
+  local lh=$(( h - 8 ))
+
+  (( lh < 2 )) && lh=$(( h - 6 ))
+  (( lh < 1 )) && lh=1
+
+  printf '%d' "${lh}"
 }
 
 # ==============================================================================
@@ -288,6 +309,24 @@ is_shows_dir() {
   local sd_card_dir
   sd_card_dir=$(detect_sd_card)
   [[ -d "/storage/$sd_card_dir/${TERMUX_DIR}/${SHOWS_DIR}" ]]
+}
+
+is_jerky_turkey_dir() {
+  local dir
+  dir="$HOME/${MOVIES_DIR}/${JERKY_TURKEY_DIR}"
+  [[ -d "${dir}" ]]
+}
+
+is_steamboat_willie_dir() {
+  local dir
+  dir="$HOME/${MOVIES_DIR}/${STEAMBOAT_WILLIE_DIR}"
+  [[ -d "${dir}" ]]
+}
+
+is_superman_dir() {
+  local dir
+  dir="$HOME/${SHOWS_DIR}/${SUPERMAN_FLEISCHER_DIR}"
+  [[ -d "${dir}" ]]
 }
 
 is_jellyfin_online() {
@@ -1023,6 +1062,25 @@ action_create_shows_library() {
   action_create_media_library "${SHOWS_NAME}" "$1"
 }
 
+action_download_url() {
+  local url="$1"
+  local dest_dir="$HOME/$2"
+  local filename="$3"
+
+  printf "Downloading: %s to %s\n" "${filename}" "${dest_dir}"
+
+  curl \
+    --fail \
+    --silent \
+    --show-error \
+    --location \
+    --retry 3 \
+    --retry-delay 2 \
+    --create-dirs \
+    --output "${dest_dir}/${filename}" \
+    "${url}"
+}
+
 # ==============================================================================
 # SUBMENU HANDLERS
 # ==============================================================================
@@ -1328,6 +1386,99 @@ EOF
   done
 }
 
+submenu_download_public_domain_media() {
+  local -r title_turkey_jerky="Turkey Jerky (1945)"
+  local -r title_steamboat_willie="Steamboat Willie (1928)"
+  local -r title_superman_ep="Superman (1941) - S01E01"
+  local -r title_all="Download All Media"
+
+  local msg_tj
+  local msg_sw
+  local msg_sm
+  local msg_all
+
+  read -r -d '' msg_tj << EOF || true
+Downloads Turkey Jerky (1945)
+from the Internet Archive to Movies
+directory on local device.
+EOF
+
+  read -r -d '' msg_sw << EOF || true
+Downloads Steamboat Willie (1928)
+from the Internet Archive to Movies
+directory on local device.
+EOF
+
+  read -r -d '' msg_sm << EOF || true
+Downloads Superman (1941) 1st episode
+from the Internet Archive to Shows
+directory on local device.
+EOF
+
+  read -r -d '' msg_all << EOF || true
+Downloads Public Domain Media from the
+Internet Archive to media subdirectories
+on local device.
+EOF
+
+  local s_tj
+  local s_sw
+  local s_sm
+  local choice
+  local -a pending_tasks
+
+  while true; do
+    s_tj="[ ]"
+    is_jerky_turkey_dir && s_tj="[X]"
+
+    s_sw="[ ]"
+    is_steamboat_willie_dir && s_sw="[X]"
+
+    s_sm="[ ]"
+    is_superman_dir && s_sm="[X]"
+
+    pending_tasks=()
+    is_jerky_turkey_dir || pending_tasks+=("action_download_url ${JERKY_TURKEY_URL} ${MOVIES_DIR}/${JERKY_TURKEY_DIR} ${JERKY_TURKEY_DIR}${MP4_EXT}")
+    is_steamboat_willie_dir || pending_tasks+=("action_download_url ${STEAMBOAT_WILLIE_URL} ${MOVIES_DIR}/${STEAMBOAT_WILLIE_DIR} ${STEAMBOAT_WILLIE_DIR}${MP4_EXT}")
+    is_superman_dir || pending_tasks+=("action_download_url ${SUPERMAN_FLEISCHER_URL} ${SHOWS_DIR}/${SUPERMAN_FLEISCHER_DIR} ${SUPERMAN_FLEISCHER_FILENAME}${MP4_EXT}")
+
+    if ! choice="$(show_menu "Download Public Domain Media" "Select an option:" \
+      "1" "${s_tj} ${title_turkey_jerky}" \
+      "2" "${s_sw} ${title_steamboat_willie}" \
+      "3" "${s_sm} ${title_superman_ep}" \
+      "4" "${title_all}" \
+      "5" "Back to Main Menu")"; then
+      break
+    fi
+
+    case "${choice}" in
+      1)
+        run_task "${title_turkey_jerky}" "${msg_tj}" is_jerky_turkey_dir \
+          "action_download_url ${JERKY_TURKEY_URL} ${MOVIES_DIR}/${JERKY_TURKEY_DIR} ${JERKY_TURKEY_DIR}${MP4_EXT}"
+        ;;
+
+      2)
+        run_task "${title_steamboat_willie}" "${msg_sw}" is_steamboat_willie_dir \
+          "action_download_url ${STEAMBOAT_WILLIE_URL} ${MOVIES_DIR}/${STEAMBOAT_WILLIE_DIR} ${STEAMBOAT_WILLIE_DIR}${MP4_EXT}"
+        ;;
+      3)
+        run_task "${title_superman_ep}" "${msg_sm}" is_superman_dir \
+          "action_download_url ${SUPERMAN_FLEISCHER_URL} ${SHOWS_DIR}/${SUPERMAN_FLEISCHER_DIR} ${SUPERMAN_FLEISCHER_FILENAME}${MP4_EXT}"
+        ;;
+      4)
+        if [[ "${#pending_tasks[@]}" -eq 0 ]]; then
+          whiptail --title "Already downloaded" \
+            --msgbox "Media already downloaded!" "$(_wt_h)" "$(_wt_w)"
+        else
+          execute_batch_tasks "${title_all}" "${msg_all}" "${pending_tasks[@]}"
+        fi
+        ;;
+      5) break ;;
+      *) break ;;
+    esac
+  done
+}
+
 # ==============================================================================
 # MAIN MENU & MAIN FUNCTION
 # ==============================================================================
@@ -1342,7 +1493,8 @@ show_main_menu() {
       "2" "Install Jellyfin" \
       "3" "Create Media Libraries" \
       "4" "Configure Jellyfin Settings" \
-      "5" "Exit Wizard"); then
+      "5" "Public Domain Media" \
+      "6" "Exit Wizard"); then
       break
     fi
 
@@ -1351,7 +1503,8 @@ show_main_menu() {
       2) submenu_install_jellyfin ;;
       3) submenu_create_media_libraries "${auth_file}" ;;
       4) submenu_configure_jellyfin_settings "${auth_file}" ;;
-      5) break ;;
+      5) submenu_download_public_domain_media ;;
+      6) break ;;
       *) break ;;
     esac
   done
