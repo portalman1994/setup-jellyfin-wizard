@@ -79,7 +79,7 @@ _wt_lh() { local h; h=$(_wt_h);
 
 detect_sd_card() {
   local sd_card_id
-  sd_card_id=$(df -h | grep -oP '/storage/[A-F0-9]{4}-[A-F0-9]{4}' | cut -d'/' -f3) || ""
+  sd_card_id=$(df -h | grep -oP '/storage/[A-F0-9]{4}-[A-F0-9]{4}' | cut -d'/' -f3)
   if [[ -z "${sd_card_id}" ]]; then
     printf "emulated/0"
     return 0
@@ -238,7 +238,7 @@ is_jq_installed() {
 }
 
 is_jellyfin_installed() {
-  command -v jellyfin --version &>/dev/null
+  command -v jellyfin &>/dev/null
 }
 
 is_dlna_installed() {
@@ -1011,7 +1011,7 @@ action_create_shows_library() {
 show_menu() {
   local -r title="$1"
   local -r prompt="$2"
-  shift 5   # drop legacy height/width/menu-height args — now computed dynamically
+  shift 2
 
   local _tmp _pid _resized _ec _result
   _tmp=$(mktemp) || return 1
@@ -1077,7 +1077,7 @@ EOF
     is_movies_dir  || pending_tasks+=("action_create_movies")
     is_shows_dir   || pending_tasks+=("action_create_shows")
 
-    if ! choice=$(show_menu "Create Media Folders" "Select an option:" 16 65 5 \
+    if ! choice=$(show_menu "Create Media Folders" "Select an option:" \
       "1" "${s_movies} ${title_movies}" \
       "2" "${s_shows} ${title_shows}" \
       "3" "${title_all}" \
@@ -1116,7 +1116,7 @@ EOF
     s_install="[ ]"
     is_jellyfin_installed && s_install="[X]"
 
-    choice=$(show_menu "Install Jellyfin" "Select an option:" 16 65 4 \
+    choice=$(show_menu "Install Jellyfin" "Select an option:" \
       "1" "${s_install} ${title_install}" \
       "2" "Back to Main Menu") || break
 
@@ -1129,7 +1129,7 @@ EOF
 }
 
 submenu_create_media_libraries() {
-  require_jellyfin_token "Create Media Libraries" "$1"
+  require_jellyfin_token "Create Media Libraries" "$1" || return 0
   local auth_file="$1"
 
   if ! is_movies_dir && ! is_shows_dir; then
@@ -1180,7 +1180,7 @@ EOF
     is_movie_library_created || pending_tasks+=("action_create_movies_library ${auth_file}")
     is_show_library_created  || pending_tasks+=("action_create_shows_library ${auth_file}")
 
-    if ! choice=$(show_menu "Create Media Libraries" "Select an option:" 15 65 4 \
+    if ! choice=$(show_menu "Create Media Libraries" "Select an option:" \
       "1" "${s_movies} ${title_movies}" \
       "2" "${s_shows} ${title_shows}" \
       "3" "${title_all}" \
@@ -1206,7 +1206,7 @@ EOF
 }
 
 submenu_configure_jellyfin_settings() {
-  require_jellyfin_token "Jellyfin Configurations" "$1"
+  require_jellyfin_token "Jellyfin Configurations" "$1" || return 0
   local auth_file="$1"
   local -r title_transcoder="Transcoder Policies"
   local msg_transcoder
@@ -1276,7 +1276,7 @@ EOF
       [[ "${trans_ok}" -eq 0 ]] && pending_tasks+=("action_configure_transcoder ${auth_file}")
       [[ "${dlna_ok}" -eq 0 ]] && pending_tasks+=("action_setup_dlna ${auth_file}")
 
-    if ! choice="$(show_menu "Configure Jellyfin Settings" "Select an option:" 18 65 8 \
+    if ! choice="$(show_menu "Configure Jellyfin Settings" "Select an option:" \
       "1" "${s_tasks} ${title_tasks}" \
       "2" "${s_trans} ${title_transcoder}" \
       "3" "${s_dlna} ${title_dlna}" \
@@ -1318,7 +1318,7 @@ show_main_menu() {
   local choice
 
   while true; do
-    if ! choice=$(show_menu "Jellyfin Setup Wizard" "Select a module to configure:" 18 68 7 \
+    if ! choice=$(show_menu "Jellyfin Setup Wizard" "Select a module to configure:" \
       "1" "Create Media Folders" \
       "2" "Install Jellyfin" \
       "3" "Create Media Libraries" \
@@ -1389,7 +1389,7 @@ EOF
       fi
 
       auth_file=$(generate_auth_file "${token}")
-      trap 'rm -f "${auth_file}"' RETURN
+      trap 'rm -f "${auth_file}"' EXIT
       show_main_menu "${auth_file}"
     elif [[ "${setup_status}" == "false" ]]; then
       info "Jellyfin is unconfigured. An admin account is absent."
